@@ -1,4 +1,5 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -10,6 +11,7 @@ using System.Windows.Forms;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Globalization;
+using System.Text;
 using System.Threading.Tasks;
 
 
@@ -59,8 +61,8 @@ namespace SplitToLine
             }
         }
 
-        public byte[] SearchBytes;
-        public byte[] ReplaceBytes;
+        private byte[] SearchBytes;
+        private byte[] ReplaceBytes;
         
         private void btnConvert_Click(object sender, EventArgs e)
         {
@@ -214,7 +216,7 @@ namespace SplitToLine
                     {
                         count = i == found2.Count ? readCount - cursor : found2[i] - cursor;
                         outFS.Write(bufferBytes, cursor, count);
-                       if (i < found2.Count)
+                        if (i < found2.Count)
                         {
                             outFS.Write(ReplaceBytes, 0, ReplaceBytes.Length);
                             cursor = found2[i] + SearchBytes.Length;
@@ -245,7 +247,8 @@ namespace SplitToLine
             System.Threading.Thread.Sleep(1000);     //give disk hardware time to recover
         }
 
-        // --- 25 seconds with 100 Task.Factory.StartNew: the most fast
+
+        // --- 25 seconds with 100 Task.Factory.StartNew
         // --- 28 seconds with 100 thread
         // Step:
         // 1. Calculate Loop Count
@@ -259,10 +262,10 @@ namespace SplitToLine
             public int id;              //chunk id
             public int matchCount;
             public int readSize;
-            public MemoryMappedViewAccessor accessor;
-            public Stream chunkStream;  //converted chunk
+            public MemoryMappedViewAccessor accessor;   //MMF chunk start pointer to read
+            public Stream chunkStream;                  //Converted MMF Chunk
         }
-        public List<ThreadStream> mmfChunkList = new List<ThreadStream>();    //Converted MMF Chunk
+        public List<ThreadStream> mmfChunkList = new List<ThreadStream>();
 
         private int maxThreads = 100;
 
@@ -294,8 +297,8 @@ namespace SplitToLine
 
                 using (var mmf = MemoryMappedFile.CreateFromFile(txtSource.Text, FileMode.Open, "Map1"))
                 {
-                    int t = 0;
-                    while (t < loopCount)
+                    int t = 0; 
+                    while(t < loopCount)
                     {
                         TaskList.Clear();
                         mmfChunkList.Clear();
@@ -318,20 +321,31 @@ namespace SplitToLine
                             t++;
                         }
 
-                        Task.WaitAll(TaskList.ToArray());
-
-                        //Write into File from ChunkList
-                        for (int idx = 0; idx < mmfChunkList.Count; idx++)
+                        try
                         {
-                            mmfChunkList[idx].chunkStream.Seek(0, SeekOrigin.Begin);
-                            mmfChunkList[idx].chunkStream.CopyTo(outFS);
+                            Task.WaitAll(TaskList.ToArray());
 
-                            matchFound += mmfChunkList[idx].matchCount;
+                            //Write into File from ChunkList
+                            for (int idx = 0; idx < mmfChunkList.Count; idx++)
+                            {
+                                mmfChunkList[idx].chunkStream.Seek(0, SeekOrigin.Begin);
+                                mmfChunkList[idx].chunkStream.CopyTo(outFS);
+
+                                matchFound += mmfChunkList[idx].matchCount;
+                            }
+
+                        }
+                        catch (AggregateException ex)
+                        {
+                            foreach (Exception inner in ex.InnerExceptions)
+                            {
+                                Console.WriteLine("Exception type {0} from {1}", inner.GetType(), inner.Source);
+                            }
+                            break;
                         }
 
                         if (cbProgress.Checked)
                             statusPanel.Text = string.Format("{0:0,0}", filePoint);
-
                     }
                 }
 
@@ -391,8 +405,42 @@ namespace SplitToLine
             return readCount;
         }
 
-        
-        
+        //
+        //Process each Chunk: Not used
+        //
+        private int Chunk_Process(FileStream outFS, int unitSize, int readSize, MemoryMappedViewAccessor accessor)
+        {
+            byte[] bufferBytes = new byte[unitSize];
+            int readCount = accessor.ReadArray(0, bufferBytes, 0, readSize);
+
+            List<int> found2 = PatternAt1(bufferBytes, SearchBytes).ToList();
+            matchFound += found2.Count;
+
+            int cursor = 0;
+            int count = 0;
+            for (int i = 0; i <= found2.Count; i++)
+            {
+                count = i == found2.Count ? readCount - cursor : found2[i] - cursor;
+                outFS.Write(bufferBytes, cursor, count);
+                if (i < found2.Count)
+                {
+                    outFS.Write(ReplaceBytes, 0, ReplaceBytes.Length);
+                    cursor = found2[i] + SearchBytes.Length;
+                }
+            }
+            Array.Clear(bufferBytes, 0, unitSize);
+            return readCount;
+        }
+
+        public static byte[] ReadFullStream(Stream input)
+        {
+            using (MemoryStream ms = new MemoryStream())
+            {
+                input.CopyTo(ms);
+                return ms.ToArray();
+            }
+        }
+
         //WORKING: Byte Compare : 61 seconds for 2.3 GB file
         static public List<int> PatternAt1(byte[] source, byte[] pattern)
         {
